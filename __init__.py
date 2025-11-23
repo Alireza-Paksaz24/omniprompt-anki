@@ -41,9 +41,13 @@ DEFAULT_CONFIG = {
     "AI_PROVIDER": "openai",
     "OPENAI_MODEL": "gpt-4o-mini",
     "DEEPSEEK_MODEL": "deepseek-chat",
-    "GEMINI_MODEL": "gemini-1.5-flash",  # Default to 1.5-pro as it's more capable
+    "GEMINI_MODEL": "gemini-1.5-flash",
     "ANTHROPIC_MODEL": "claude-opus-4-latest",
     "XAI_MODEL": "grok-3-latest",
+    "OLLAMA_MODEL": "llama3.2",
+    "LMSTUDIO_MODEL": "local-model",
+    "OLLAMA_BASE_URL": "http://localhost:11434",
+    "LMSTUDIO_BASE_URL": "http://localhost:1234",
     # Now includes all supported providers
     "API_KEYS": {
         # "openai": "...",
@@ -78,7 +82,10 @@ CONFIG_SCHEMA = {
         "GEMINI_MODEL": {"type": "string"},
         "ANTHROPIC_MODEL": {"type": "string"},
         "XAI_MODEL": {"type": "string"},
-        # Single key per provider
+        "OLLAMA_MODEL": {"type": "string"},
+        "LMSTUDIO_MODEL": {"type": "string"},
+        "OLLAMA_BASE_URL": {"type": "string"},
+        "LMSTUDIO_BASE_URL": {"type": "string"},
         "API_KEYS": {"type": "object"},
         "TEMPERATURE": {"type": "number"},
         "MAX_TOKENS": {"type": "integer"},
@@ -353,6 +360,10 @@ class OmniPromptManager:
             return self._make_anthropic_request(prompt, stream_progress_callback)
         elif provider == "xai":
             return self._make_xai_request(prompt, stream_progress_callback)
+        elif provider == "ollama":
+            return self._make_ollama_request(prompt, stream_progress_callback)
+        elif provider == "lmstudio":
+            return self._make_lmstudio_request(prompt, stream_progress_callback)
         else:
             logger.error(f"Invalid AI provider: {provider}")
             return "[Error: Invalid provider]"
@@ -558,6 +569,83 @@ class OmniPromptManager:
             except Exception:
                 logger.exception("DeepSeek non-stream parse error:")
                 return "[Error: parse failure]"
+    def _make_ollama_request(self, prompt: str, stream_callback=None) -> str:
+        """Make request to local Ollama instance"""
+        model = self.config.get("OLLAMA_MODEL", "llama3.2")
+        base_url = self.config.get("OLLAMA_BASE_URL", "http://localhost:11434")
+        url = f"{base_url}/api/generate"
+        
+        headers = {
+            "Content-Type": "application/json"
+        }
+        
+        data = {
+            "model": model,
+            "prompt": prompt,
+            "stream": False,
+            "options": {
+                "temperature": self.config.get("TEMPERATURE", 0.2),
+                "num_predict": self.config.get("MAX_TOKENS", 200)
+            }
+        }
+        
+        try:
+            response = requests.post(
+                url,
+                headers=headers,
+                json=data,
+                timeout=self.config.get("TIMEOUT", 60))  # Longer timeout for local
+            response.raise_for_status()
+            response_json = response.json()
+            
+            if "response" in response_json:
+                return response_json["response"].strip()
+            return "[Error: Unexpected Ollama response format]"
+            
+        except requests.exceptions.ConnectionError:
+            logger.exception("Cannot connect to Ollama. Is it running?")
+            return "[Error: Cannot connect to Ollama. Make sure it's running on localhost:11434]"
+        except Exception as e:
+            logger.exception("Ollama API request failed:")
+            return f"[Error: {str(e)}]"
+
+    def _make_lmstudio_request(self, prompt: str, stream_callback=None) -> str:
+        """Make request to local LM Studio instance"""
+        model = self.config.get("LMSTUDIO_MODEL", "local-model")
+        base_url = self.config.get("LMSTUDIO_BASE_URL", "http://localhost:1234")
+        url = f"{base_url}/v1/chat/completions"
+        
+        headers = {
+            "Content-Type": "application/json"
+        }
+        
+        data = {
+            "model": model,
+            "messages": [{"role": "user", "content": prompt}],
+            "temperature": self.config.get("TEMPERATURE", 0.2),
+            "max_tokens": self.config.get("MAX_TOKENS", 200)
+        }
+        
+        try:
+            response = requests.post(
+                url,
+                headers=headers,
+                json=data,
+                timeout=self.config.get("TIMEOUT", 60))  # Longer timeout for local
+            response.raise_for_status()
+            response_json = response.json()
+            
+            if "choices" in response_json and response_json["choices"]:
+                text = response_json["choices"][0]["message"]["content"]
+                return text.strip()
+            return "[Error: Unexpected LM Studio response format]"
+            
+        except requests.exceptions.ConnectionError:
+            logger.exception("Cannot connect to LM Studio. Is it running?")
+            return "[Error: Cannot connect to LM Studio. Make sure it's running on localhost:1234]"
+        except Exception as e:
+            logger.exception("LM Studio API request failed:")
+            return f"[Error: {str(e)}]"
 
     def _send_request(self, url: str, headers: dict, data: dict) -> str:
         retries = 3
@@ -705,6 +793,11 @@ class SettingsDialog(QDialog):
             self.model_combo.setCurrentText(config.get("ANTHROPIC_MODEL", "claude-opus-4-latest"))
         elif provider == "xai":
             self.model_combo.setCurrentText(config.get("XAI_MODEL", "grok-3-latest"))
+        elif provider == "ollama":
+            self.model_combo.setCurrentText(config.get("OLLAMA_MODEL", "llama3.2"))
+        elif provider == "lmstudio":
+            self.model_combo.setCurrentText(config.get("LMSTUDIO_MODEL", "local-model"))
+    
 
         # Show the key for whichever provider is selected
         self.show_provider_key()
@@ -727,10 +820,16 @@ class SettingsDialog(QDialog):
             self.config["ANTHROPIC_MODEL"] = self.model_combo.currentText()
         elif provider == "xai":
             self.config["XAI_MODEL"] = self.model_combo.currentText()
-
-        # Store the single key for this provider
-        self.config.setdefault("API_KEYS", {})
-        self.config["API_KEYS"][provider] = self.api_key_input.text()
+        elif provider == "ollama":
+            self.config["OLLAMA_MODEL"] = self.model_combo.currentText()
+        elif provider == "lmstudio":
+            self.config["LMSTUDIO_MODEL"] = self.model_combo.currentText()
+        
+        # Only store API key for non-local providers
+        if provider not in ["ollama", "lmstudio"]:
+            # Store the single key for this provider
+            self.config.setdefault("API_KEYS", {})
+            self.config["API_KEYS"][provider] = self.api_key_input.text()
 
         self.config["AI_PROVIDER"] = provider
         self.config["TEMPERATURE"] = float(self.temperature_input.text())
@@ -753,14 +852,29 @@ class SettingsDialog(QDialog):
             self.model_combo.addItems(["claude-opus-4-latest", "claude-sonnet-4-latest", "claude-haiku-3.5-latest"])
         elif provider == "xai":
             self.model_combo.addItems(["grok-3-latest", "grok-3-mini-latest"])
-
+        elif provider == "ollama":
+            self.model_combo.addItems([
+                "llama3.2", "llama3.1", "llama2", "mistral", "mixtral", 
+                "codellama", "phi", "gemma", "qwen2.5"
+            ])
+            self.model_combo.setEditable(True)  # Allow custom model names
+        elif provider == "lmstudio":
+            self.model_combo.addItems(["local-model"])
+            self.model_combo.setEditable(True)  # Allow custom model names
         self.show_provider_key()
 
     def show_provider_key(self):
         provider = self.provider_combo.currentText()
-        # Show the single key for that provider
-        key = self.config.get("API_KEYS", {}).get(provider, "")
-        self.api_key_input.setText(key)
+        
+        # Hide API key field for local providers
+        if provider in ["ollama", "lmstudio"]:
+            self.api_key_input.setVisible(False)
+            self.api_key_input.parent().labelForField(self.api_key_input).setVisible(False)
+        else:
+            self.api_key_input.setVisible(True)
+            self.api_key_input.parent().labelForField(self.api_key_input).setVisible(True)
+            key = self.config.get("API_KEYS", {}).get(provider, "")
+            self.api_key_input.setText(key)
 
     def show_log(self) -> None:
         log_path = os.path.join(os.path.dirname(__file__), "omnPrompt-anki.log")
